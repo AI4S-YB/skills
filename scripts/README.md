@@ -49,6 +49,15 @@
 - `OPENAI_BASE_URL` 默认是 `https://api.openai.com/v1`
 - `PR_REVIEW_PROMPT_PATH` 默认是 `prompts/repo-pr-review.md`
 
+`OPENAI_BASE_URL` 可以填完整 API 前缀，也可以只填网关根地址。
+
+例如这两种都支持：
+
+- `https://api.openai.com/v1`
+- `http://your-gateway.example.com:3001`
+
+脚本会优先尝试 `responses` 接口；如果失败，再回退到 `chat/completions`。
+
 ## 自定义 prompt
 
 直接修改 `prompts/repo-pr-review.md` 就行。

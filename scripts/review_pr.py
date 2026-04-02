@@ -113,6 +113,65 @@ def normalize_multiline(value: Any) -> str:
     return str(value)
 
 
+def normalize_api_base_url(base_url: str) -> str:
+    value = base_url.strip().rstrip("/")
+    if not value:
+        return "https://api.openai.com/v1"
+    if value.endswith("/v1"):
+        return value
+    return f"{value}/v1"
+
+
+def parse_json_response(raw: str, *, url: str) -> Any:
+    if not raw.strip():
+        raise RuntimeError(f"LLM API returned an empty body from {url}")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        snippet = raw[:400].replace("\n", "\\n")
+        raise RuntimeError(f"LLM API did not return valid JSON from {url}: {snippet}") from exc
+
+
+def extract_response_text(data: Any) -> str:
+    if isinstance(data, dict):
+        output_text = data.get("output_text")
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text.strip()
+
+        output = data.get("output")
+        if isinstance(output, list):
+            parts: list[str] = []
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                content = item.get("content")
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") in {"output_text", "text"}:
+                        text_value = block.get("text")
+                        if isinstance(text_value, str):
+                            parts.append(text_value)
+                        elif isinstance(text_value, dict) and isinstance(text_value.get("value"), str):
+                            parts.append(text_value["value"])
+            text = "".join(parts).strip()
+            if text:
+                return text
+
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            if isinstance(first, dict):
+                message = first.get("message", {})
+                text = normalize_multiline(message.get("content", "")).strip()
+                if text:
+                    return text
+
+    raise RuntimeError(f"Unexpected LLM API response shape: {json.dumps(data, ensure_ascii=False)[:800]}")
+
+
 def github_request(token: str, method: str, path: str, payload: Any | None = None) -> Any:
     url = f"https://api.github.com{path}"
     headers = {
@@ -163,8 +222,51 @@ def chat_completion(
     system_prompt: str,
     user_prompt: str,
 ) -> str:
-    url = f"{base_url.rstrip('/')}/chat/completions"
-    payload = {
+    api_base = normalize_api_base_url(base_url)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT", "").strip()
+    text_verbosity = os.getenv("OPENAI_TEXT_VERBOSITY", "").strip()
+
+    combined_input = textwrap.dedent(
+        f"""\
+        [System]
+        {system_prompt}
+
+        [User]
+        {user_prompt}
+        """
+    ).strip()
+
+    response_payload: dict[str, Any] = {
+        "model": model,
+        "input": combined_input,
+    }
+    if reasoning_effort:
+        response_payload["reasoning"] = {"effort": reasoning_effort}
+    if text_verbosity:
+        response_payload["text"] = {"verbosity": text_verbosity}
+
+    response_url = f"{api_base}/responses"
+    req = request.Request(
+        response_url,
+        method="POST",
+        headers=headers,
+        data=json.dumps(response_payload).encode("utf-8"),
+    )
+    try:
+        with request.urlopen(req, timeout=180) as response:
+            data = parse_json_response(response.read().decode("utf-8", "replace"), url=response_url)
+        return extract_response_text(data)
+    except error.HTTPError as exc:
+        response_error = f"{exc.code} {exc.read().decode('utf-8', 'replace')}"
+    except RuntimeError as exc:
+        response_error = str(exc)
+
+    chat_url = f"{api_base}/chat/completions"
+    chat_payload = {
         "model": model,
         "temperature": 0.1,
         "messages": [
@@ -172,31 +274,25 @@ def chat_completion(
             {"role": "user", "content": user_prompt},
         ],
     }
-    req = request.Request(
-        url,
+    chat_req = request.Request(
+        chat_url,
         method="POST",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        data=json.dumps(chat_payload).encode("utf-8"),
     )
     try:
-        with request.urlopen(req, timeout=180) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        with request.urlopen(chat_req, timeout=180) as response:
+            data = parse_json_response(response.read().decode("utf-8", "replace"), url=chat_url)
+        return extract_response_text(data)
     except error.HTTPError as exc:
         body = exc.read().decode("utf-8", "replace")
-        raise RuntimeError(f"LLM API request failed: {exc.code} {body}") from exc
-
-    try:
-        message = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError(f"Unexpected LLM API response: {json.dumps(data, ensure_ascii=False)}") from exc
-
-    text = normalize_multiline(message).strip()
-    if not text:
-        raise RuntimeError("LLM API returned empty content")
-    return text
+        raise RuntimeError(
+            f"LLM API request failed. responses error: {response_error}; chat error: {exc.code} {body}"
+        ) from exc
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"LLM API request failed. responses error: {response_error}; chat error: {exc}"
+        ) from exc
 
 
 def load_prompt(repo_root: Path) -> str:
