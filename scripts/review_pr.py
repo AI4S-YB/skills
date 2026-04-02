@@ -11,6 +11,17 @@ from typing import Any
 from urllib import error, request
 
 COMMENT_MARKER = "<!-- repo-pr-review-bot -->"
+VERDICT_EMOJIS = {
+    "BLOCK": "🔴",
+    "NEEDS_ATTENTION": "🟡",
+    "NO_BLOCKING_FINDINGS": "🟢",
+}
+SEVERITY_EMOJIS = {
+    "critical": "🔴",
+    "high": "🔴",
+    "medium": "🟡",
+    "low": "🟢",
+}
 
 DEFAULT_PROMPT = textwrap.dedent(
     """\
@@ -187,6 +198,34 @@ def extract_response_text(data: Any) -> str:
                     return text
 
     raise RuntimeError(f"Unexpected LLM API response shape: {json.dumps(data, ensure_ascii=False)[:800]}")
+
+
+def decorate_report_markdown(report: str) -> str:
+    lines = report.strip().splitlines()
+    decorated: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        if stripped in {f"`{key}`" for key in VERDICT_EMOJIS}:
+            verdict = stripped.strip("`")
+            decorated.append(f"{VERDICT_EMOJIS[verdict]} {verdict}")
+            continue
+
+        if stripped in VERDICT_EMOJIS:
+            decorated.append(f"{VERDICT_EMOJIS[stripped]} {stripped}")
+            continue
+
+        match = re.match(r"^(\d+\.\s+)(\[(critical|high|medium|low)\])\s+(.*)$", stripped, re.IGNORECASE)
+        if match:
+            prefix, label, severity, rest = match.groups()
+            emoji = SEVERITY_EMOJIS[severity.lower()]
+            decorated.append(f"{prefix}{emoji} {label.lower()} {rest}")
+            continue
+
+        decorated.append(line)
+
+    return "\n".join(decorated).strip()
 
 
 def github_request(token: str, method: str, path: str, payload: Any | None = None) -> Any:
@@ -528,11 +567,11 @@ def build_synthesis_prompt(
         严格使用下面模板：
 
         ## Verdict
-        `BLOCK|NEEDS_ATTENTION|NO_BLOCKING_FINDINGS`
+        🔴 BLOCK / 🟡 NEEDS_ATTENTION / 🟢 NO_BLOCKING_FINDINGS
         一句话结论。
 
         ## Findings
-        1. [severity] file:line - title
+        1. 🔴 [high] file:line - title
            证据：...
            影响：...
            建议：...
@@ -556,7 +595,7 @@ def build_synthesis_prompt(
 
 
 def build_comment_body(report: str, model: str) -> str:
-    cleaned_report = report.strip()
+    cleaned_report = decorate_report_markdown(report)
     return (
         f"{COMMENT_MARKER}\n"
         "## 冷酷 PR 审查\n\n"
