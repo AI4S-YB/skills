@@ -1,0 +1,46 @@
+name: repo-pr-review
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - edited
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  review:
+    if: ${{ github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: repo-pr-review-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - name: Checkout trusted base revision
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.base.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run repository PR review bot
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          PR_REVIEW_PROMPT_PATH: ${{ vars.PR_REVIEW_PROMPT_PATH }}
+          PR_REVIEW_MAX_FILES: ${{ vars.PR_REVIEW_MAX_FILES }}
+          PR_REVIEW_MAX_PATCH_CHARS_PER_FILE: ${{ vars.PR_REVIEW_MAX_PATCH_CHARS_PER_FILE }}
+          PR_REVIEW_MAX_TOTAL_PATCH_CHARS: ${{ vars.PR_REVIEW_MAX_TOTAL_PATCH_CHARS }}
+        run: python scripts/review_pr.py
