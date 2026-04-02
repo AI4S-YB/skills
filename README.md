@@ -7,6 +7,7 @@
 - skill 配置与提示词
 - 自动化脚本
 - 仓库级 PR 审核 bot
+- `review-skill-safety/`：用于审查其他 skill 是否安全的 skill
 
 如果你要看 PR 审核 bot 的说明，去 `scripts/README.md`。
 
